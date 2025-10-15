@@ -1,0 +1,169 @@
+version: '3.8'
+
+x-airflow-common:
+  &airflow-common
+  image: apache/airflow:3.0.2
+  environment:
+    - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres-airflow:5432/airflow
+    - AIRFLOW_CONN_POSTGRES_DEFAULT=postgresql://datawarehouse_user:datawarehouse_password@postgres-datawarehouse:5432/taxi_datawarehouse
+    - AIRFLOW_CONN_MYSQL_DEFAULT=mysql+pymysql://datawarehouse_user:datawarehouse_password@mysql-datawarehouse:3306/taxi_datawarehouse
+    - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+    - AIRFLOW__CORE__LOAD_EXAMPLES=False
+    - "PIP_ADDITIONAL_PACKAGES=apache-airflow-providers-http apache-airflow-providers-standard apache-airflow-providers-postgres apache-airflow-providers-mysql psycopg2-binary pymysql pandas sqlalchemy"
+    - NIFI_PG_ID=${NIFI_PG_ID}
+    - NIFI_BASE_URL=https://nifi:8443
+    - NIFI_USERNAME=nifi
+    - NIFI_PASSWORD=nifipassword
+    
+ 
+  volumes:
+    - ./dags:/opt/airflow/dags
+  networks:
+    - elt_network
+
+services:
+  # ----------------- AIRFLOW SERVICES -----------------
+  postgres-airflow:
+    image: postgres:13
+    container_name: postgres-airflow
+    environment:
+      - POSTGRES_USER=airflow
+      - POSTGRES_PASSWORD=airflow
+      - POSTGRES_DB=airflow
+      
+    volumes:
+      - airflow_postgres_data:/var/lib/postgresql/data
+    networks:
+      - elt_network
+
+  airflow-standalone:
+    <<: *airflow-common
+    container_name: airflow-standalone
+    depends_on:
+      - postgres-airflow
+      - postgres-datawarehouse
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./dags:/opt/airflow/dags
+    command: ["standalone"]
+
+  # ----------------- NIFI SERVICE -----------------
+  nifi:
+    image: apache/nifi:1.25.0
+    container_name: nifi
+    user: root
+    environment:
+      - NIFI_WEB_HTTPS_PORT=8443
+      - SINGLE_USER_CREDENTIALS_USERNAME=nifi
+      - SINGLE_USER_CREDENTIALS_PASSWORD=nifipassword
+      - NIFI_WEB_PROXY_HOST=nifi:8443
+      - NIFI_JVM_HEAP_INIT=2g
+      - NIFI_JVM_HEAP_MAX=4g
+    ports:
+      - "8443:8443"
+    volumes:
+      - ./nifi_data/input:/opt/nifi/input_data
+      - ./nifi_data/nifi_drivers:/opt/nifi/drivers
+      # ADD THESE PERSISTENT VOLUMES:
+      - nifi_conf:/opt/nifi/nifi-current/conf
+      - nifi_database_repository:/opt/nifi/nifi-current/database_repository
+      - nifi_flowfile_repository:/opt/nifi/nifi-current/flowfile_repository
+      - nifi_content_repository:/opt/nifi/nifi-current/content_repository
+      - nifi_provenance_repository:/opt/nifi/nifi-current/provenance_repository
+      - nifi_state:/opt/nifi/nifi-current/state
+      - nifi_logs:/opt/nifi/nifi-current/logs
+    networks:
+      - elt_network
+
+  # ----------------- DATA WAREHOUSE (Main PostgreSQL for taxi data) -----------------
+  postgres-datawarehouse:
+    image: postgres:13
+    container_name: postgres-datawarehouse
+    environment:
+      - POSTGRES_USER=datawarehouse_user
+      - POSTGRES_PASSWORD=datawarehouse_password
+      - POSTGRES_DB=taxi_datawarehouse
+    ports:
+      - "5433:5432"  # ✅ CHANGE: External 5433, Internal 5432
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    
+    networks:
+      - elt_network
+
+  # ----------------- METABASE SERVICE -----------------
+  metabase:
+    image: metabase/metabase:latest
+    container_name: metabase
+    ports:
+      - "3000:3000"
+    volumes:
+      - metabase_data:/metabase-data
+    networks:
+      - elt_network
+
+  # ----------------- ADDITIONAL DATA SOURCES -----------------
+
+
+  mysql-datawarehouse:
+    image: mysql:8.0
+    container_name: mysql-datawarehouse
+    environment:
+      - MYSQL_ROOT_PASSWORD=datawarehouse_password
+      - MYSQL_DATABASE=taxi_datawarehouse
+      - MYSQL_USER=datawarehouse_user
+      - MYSQL_PASSWORD=datawarehouse_password
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    networks:
+      - elt_network
+
+  agent-schema:
+    image: python:3.11-slim
+    container_name: agent-schema
+    working_dir: /app
+    command: bash -c "pip install -r requirements.txt && uvicorn app:app --host 0.0.0.0 --port 8000 "
+    volumes:
+      - ./agent-schema:/app
+      - ./nifi_data/input:/opt/nifi/input_data
+    environment:
+      - POSTGRES_URL=postgresql+psycopg2://datawarehouse_user:datawarehouse_password@postgres-datawarehouse:5432/taxi_datawarehouse
+      - MYSQL_URL=mysql+pymysql://datawarehouse_user:datawarehouse_password@mysql-datawarehouse:3306/taxi_datawarehouse
+      - AGENT_API_KEY=my-secret-key
+      - DISABLE_LLM=False
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - GEMINI_MODEL=gemini-2.0-flash-lite
+   
+    ports:
+      - "8002:8000"
+    networks:
+      - elt_network
+
+
+
+
+volumes:
+  # Airflow & Databases
+  airflow_postgres_data:
+  postgres_data:
+  mysql_data:
+
+  # Metabase
+  metabase_data:
+
+  # NiFi
+  nifi_conf:
+  nifi_database_repository:
+  nifi_flowfile_repository:
+  nifi_content_repository:
+  nifi_provenance_repository:
+  nifi_state:
+  nifi_logs:
+
+
+networks:
+  elt_network:
+    driver: bridge

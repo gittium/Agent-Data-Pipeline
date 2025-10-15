@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+pandas
+psycopg2-binary
+requests
+python-dotenv
+rich
+pendulum
+google-generativeai
+sqlalchemy 
+pymysql
+cryptography
